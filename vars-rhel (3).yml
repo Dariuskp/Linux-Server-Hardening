@@ -1,6 +1,6 @@
 ---
-brand_name: "PTG"
-report_dir: "/opt/PTG/compliance"
+brand_name: "Company"
+report_dir: "/opt/Company/compliance"
 
 allowed_groups: ["sudo", "wheel", "adm"]
 
@@ -10,7 +10,7 @@ run_cis_level_2: true
 setup_audit: true
 
 # Set CIS Profile
-rhel9cis_authselect_custom_profile_name: "ptg_cis_profile"
+rhel9cis_authselect_custom_profile_name: "Company_cis_profile"
 
 # Exclusiion list
 rhel9cis_sudoers_exclude_nopasswd_list:
