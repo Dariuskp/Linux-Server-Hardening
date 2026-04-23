@@ -1,10 +1,9 @@
 ---
-- name: Build PTG Golden Base Image - RHEL/AlmaLinux
+- name: Build Company Golden Base Image - RHEL/AlmaLinux
   hosts: all
   become: true
   vars_files:
     - vars-rhel.yml
-
   roles:
     - role: RHEL9-CIS
       when: run_cis_level_1
@@ -105,7 +104,7 @@
         - { regexp: "^#?AllowAgentForwarding",   line: "AllowAgentForwarding no" }
 
     # ── 6. KERNEL HARDENING ──────────────────────────────────────────────────
-    - name: 6. KERNEL - Apply PTG sysctl Params
+    - name: 6. KERNEL - Apply Company sysctl Params
       sysctl:
         name: "{{ item.key }}"
         value: "{{ item.value | string }}"
@@ -122,7 +121,7 @@
         name: "{{ item.key }}"
         value: "{{ item.value }}"
         state: present
-        sysctl_file: /etc/sysctl.d/99-ptg-lynis.conf
+        sysctl_file: /etc/sysctl.d/99-Company-lynis.conf
         reload: yes
       loop:
         - { key: "dev.tty.ldisc_autoload",  value: "0" }
@@ -282,7 +281,7 @@
           * AUTHORIZED ACCESS ONLY                                         *
           * Unauthorized access is prohibited and will be prosecuted.      *
           * All connections are logged and monitored.                       *
-          * Powell Technology Group LLC -- Secure at Every Stage           *
+          * Company -- Secure at Every Stage           *
           ******************************************************************
       loop:
         - /etc/issue
@@ -294,7 +293,7 @@
         dest: "{{ report_dir }}/manifest.txt"
         content: |
           ------------------------------------------------
-          Powell Technology Group LLC - HARDENED IMAGE MANIFEST
+          Company - HARDENED IMAGE MANIFEST
           Build Date: {{ ansible_date_time.date }}
           OS: RHEL 9 / AlmaLinux 9
           Compliance Level: CIS Level 2
@@ -305,14 +304,14 @@
           Auditd: Enabled (immutable ruleset)
           Fail2ban: Active (SSH jail enabled)
           Process Accounting: psacct + sysstat Active
-          Lynis Sysctl Hardening: Applied (99-ptg-lynis.conf)
+          Lynis Sysctl Hardening: Applied (99-Company-lynis.conf)
           Firewire: Blacklisted
           Core Dumps: Disabled
           File Permissions: Hardened (at.allow, cron.allow 600)
           Path Fix: Applied (all user and root profiles)
           Legal Banners: /etc/issue + /etc/issue.net
           Compiler Access: Restricted to root
-          PTG Standard: Secure at Every Stage
+          Company Standard: Secure at Every Stage
           ------------------------------------------------
       tags: manifest
 
