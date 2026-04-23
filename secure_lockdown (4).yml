@@ -1,0 +1,226 @@
+---
+- name: Deep Level Linux Server Hardening
+  hosts: test
+  become: true
+  become_method: sudo
+  vars_files:
+    - /home/user/vars.yml
+    - /home/user/vault.yml
+
+  tasks:
+
+      - name: Create reports directory
+        file:
+          path: /home/user/patching_reports/secure_servers
+          state: directory
+          mode: '0755'
+        tags: reports
+
+      - name: Create new reports files
+        file:
+          path: "/home/user/patching_reports/secure_servers/secure_server{{item}}"
+          state: touch
+          mode: '0666'
+        loop:
+         - .report.body
+         - .report.header
+         - .report
+
+      - name: Ensure only specific SSH users are allowed
+        lineinfile:
+          path: /etc/ssh/sshd_config
+          regexp: '^AllowUsers'
+          line: "AllowUsers {{ allowed_ssh_users | join(' ') }}"
+          create: yes
+
+      - name: Set SSH port to 22
+        lineinfile:
+          path: /etc/ssh/sshd_config
+          regexp: "^#?Port "
+          line: "Port 22" 
+          state: present
+          backup: yes # Creates a backup of the original file
+
+      - name: Disable root login
+        lineinfile:
+          path: /etc/ssh/sshd_config
+          regexp: "^#?PermitRootLogin "
+          line: "PermitRootLogin no"
+          state: present
+          backup: yes
+
+      - name: Disable password authentication
+        lineinfile:
+          path: /etc/ssh/sshd_config
+          regexp: "^#?PasswordAuthentication "
+          line: "PasswordAuthentication no"
+          state: present
+          backup: yes
+
+      - name: Disable unnecessary and risky services
+        systemd:
+          name: "{{ item }}"
+          enabled: false
+          state: stopped
+        loop: "{{ disable_services }}"
+
+      - name: Apply kernel-level sysctl security settings
+        sysctl:
+          name: "{{ item.key }}"
+          value: "{{ item.value }}"
+          state: present
+          reload: yes
+        loop: "{{ sysctl_hardening | dict2items }}"
+
+      - name: Disable core dumps
+        lineinfile:
+          path: /etc/security/limits.conf
+          line: "* hard core 0"
+          create: yes
+
+      - name: Set file permission umask
+        lineinfile:
+          path: /etc/profile
+          regexp: '^umask'
+          line: "umask 027"
+
+      - name: Install firewalld
+        yum:
+          name: firewalld
+          state: present
+
+      - name: Enable and start firewalld
+        systemd:
+          name: firewalld
+          enabled: yes
+          state: started
+
+      - name: Allow essential ports
+        firewalld:
+          service: "{{ item }}"
+          permanent: yes
+          state: enabled
+        loop:
+          - ssh
+
+      - name: Reload firewall
+        systemd:
+          name: firewalld
+          enabled: yes
+          state: restarted
+
+      - name: Install dnf-automatic
+        dnf:
+          name: dnf-automatic
+          state: present
+
+      - name: Enable automatic updates timer
+        systemd:
+          name: dnf-automatic.timer
+          enabled: yes
+          state: started
+            
+      - name: Install and enable auditd
+        yum:
+          name: audit
+          state: present
+
+      - name: Ensure auditd is running
+        service:
+          name: auditd
+          enabled: yes
+          state: started
+
+      - name: Check audit for logs status
+        command: aureport
+        register: audit_logs_status
+
+      - name: Print audit log status
+        debug:
+          var: audit_logs_status.stdout_lines
+
+      - name: Enforce secure permissions on /etc/passwd and /etc/shadow
+        file:
+          path: "{{ item }}"
+          owner: root
+          group: root
+          mode: "{{ '0644' if item == '/etc/passwd' else '0000' }}"
+        loop:
+          - /etc/passwd
+          - /etc/shadow
+
+      - name: Install Fail2ban
+        yum:
+          name: fail2ban
+          state: present
+
+      - name: Enable and start fail2ban
+        systemd:
+          name: fail2ban
+          enabled: yes
+          state: started
+
+      - name: Create report header
+        shell: |
+          echo "Server Hardening  Report" > /home/user/patching_reports/secure_servers/secure_server.report.header
+          echo "--------------------------------" >> /home/user/patching_reports/secure_servers/secure_server.report.header
+          echo "Date          : `date`" >> /home/user/patching_reports/secure_servers/secure_server.report.header
+          echo "Machine       : {{ ansible_hostname }}" >> /home/user/patching_reports/secure_servers/secure_server.report.header
+          echo " " >> /home/user/patching_reports/secure_servers/secure_server.report.header
+          echo "Hostname      : {{ ansible_hostname}}" >> /home/user/patching_reports/secure_servers/secure_server.report.header
+          echo "Booted Kernel Version: `uname -a`" >> /home/user/patching_reports/secure_servers/secure_server.report.header
+          echo " " >> /home/user/patching_reports/secure_servers/secure_server.report.header
+        tags: reports
+
+      - name: Create report body
+        shell: |
+          echo "This server is now secure, sshd has been restarted. SSH logins are no longer allowed! Console access only!" >> /home/user/patching_reports/secure_servers/secure_server.report.body
+          echo "----------------------" >> /home/user/patching_reports/secure_servers/secure_server.report.body
+          echo "Uptime          : `uptime`" >> /home/user/patching_reports/secure_servers/secure_server.report.body
+        tags: reports
+
+      - name: Compile reports
+        shell: |
+          echo "Ending OS Version      : `cat /etc/os-release`" >> /home/user/patching_reports/yum_updates.report.header
+          echo "Ending Kernel Version  : `needs-restarting -r | grep kernel | awk '{ print $3 }'`.x86_64" >> /home/user/patching_reports/yum_updates.report.header
+          echo " " >> /home/user/patching_reports/secure_servers/secure_server.report.header
+          echo " " >> /home/user/patching_reports/secure_servers/secure_server.report.header
+          echo " " >> /home/user/patching_reports/secure_servers/secure_server.report.body
+          cat /home/user/patching_reports/secure_servers/secure_server.report.header > /home/user/patching_reports/secure_servers/secure_server.report
+          cat /home/user/patching_reports/secure_servers/secure_server.report.body >> /home/user/patching_reports/secure_servers/secure_server.report
+        tags: reports
+
+      - name: Convert report file into .txt file
+        copy:
+          src: /home/user/patching_reports/secure_servers/secure_server.report
+          dest: /home/user/patching_reports/secure_servers/secure_server.txt
+          remote_src: true
+        tags: report
+
+      - name: Ensure s-nail is installed
+        yum:
+          name: s-nail
+          state: present
+
+      - name: Email compiled report via s-nail
+        shell: |
+          mailx -s "System Harden Report - {{ ansible_date_time.date }}" \
+            -a /home/user/patching_reports/secure_servers/secure_server.txt \
+            user@outlook.com < /dev/null
+
+      - name: Restart SSH
+        service:
+          name: sshd
+          state: restarted
+
+      - name: Ensure SELinux is enabled
+        lineinfile:
+          path: /etc/selinux/config
+          regexp: "^SELINUX="
+          line: "SELINUX=enabled"
+          state: present
+ 
+      - name: Set SELinux to enforcing mode immediately
+        command: setenforce 1
+        when: ansible_selinux.status != "enforcing"
+

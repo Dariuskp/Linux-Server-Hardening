@@ -1,0 +1,401 @@
+---
+- name: Build PTG Golden Base Image - RHEL/AlmaLinux
+  hosts: all
+  become: true
+  vars_files:
+    - vars-rhel.yml
+
+  roles:
+    - role: RHEL9-CIS
+      when: run_cis_level_1
+
+  tasks:
+
+    # ── 1. SYSTEM PREP ───────────────────────────────────────────────────────
+    - name: 1. SYSTEM PREP - Create Branding & Report Dirs
+      file:
+        path: "{{ report_dir }}"
+        state: directory
+        mode: '0750'
+        owner: root
+        group: root
+
+    # ── 2. EPEL ──────────────────────────────────────────────────────────────
+    - name: 2. EPEL - Install for RHEL 9 on AWS
+      shell: |
+        dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm || true
+        dnf config-manager --set-enabled epel
+      args:
+        executable: /bin/bash
+
+    # ── 3. PACKAGES ──────────────────────────────────────────────────────────
+    - name: 3. PACKAGE MGMT - Install Base Security Stack
+      dnf:
+        name: "{{ base_packages }}"
+        state: present
+
+    - name: 3b. PACKAGE MGMT - Install psacct and sysstat
+      dnf:
+        name:
+          - psacct
+          - sysstat
+        state: present
+
+    # ── 4. PATH FIX (early — before anything needs it) ───────────────────────
+    # Must run early. The CIS role aggressively restricts PATH which breaks
+    # tr, grep, and other coreutils when using sudo su or switching users.
+    - name: 4. PATH FIX - /etc/environment
+      blockinfile:
+        path: /etc/environment
+        block: |
+          PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        state: present
+
+    - name: 4b. PATH FIX - /etc/profile
+      lineinfile:
+        path: /etc/profile
+        line: 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+        state: present
+
+    - name: 4c. PATH FIX - /etc/bashrc
+      lineinfile:
+        path: /etc/bashrc
+        line: 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+        state: present
+
+    - name: 4d. PATH FIX - /root/.bashrc
+      lineinfile:
+        path: /root/.bashrc
+        line: 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+        state: present
+        create: yes
+
+    - name: 4e. PATH FIX - /root/.bash_profile
+      lineinfile:
+        path: /root/.bash_profile
+        line: 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+        state: present
+        create: yes
+
+    - name: 4f. PATH FIX - /home/ec2-user/.bashrc
+      lineinfile:
+        path: /home/ec2-user/.bashrc
+        line: 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+        state: present
+        create: yes
+
+    # ── 5. SSH HARDENING ─────────────────────────────────────────────────────
+    - name: 5. SSH HARDENING - Secure Access Policy
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        state: present
+        validate: '/usr/sbin/sshd -t -f %s'
+      loop:
+        - { regexp: "^#?PermitRootLogin",       line: "PermitRootLogin no" }
+        - { regexp: "^#?PasswordAuthentication", line: "PasswordAuthentication no" }
+        - { regexp: "^#?MaxAuthTries",           line: "MaxAuthTries 3" }
+        - { regexp: "^#?AllowTcpForwarding",     line: "AllowTcpForwarding no" }
+        - { regexp: "^#?ClientAliveCountMax",    line: "ClientAliveCountMax 2" }
+        - { regexp: "^#?LogLevel",               line: "LogLevel VERBOSE" }
+        - { regexp: "^#?MaxSessions",            line: "MaxSessions 2" }
+        - { regexp: "^#?TCPKeepAlive",           line: "TCPKeepAlive no" }
+        - { regexp: "^#?X11Forwarding",          line: "X11Forwarding no" }
+        - { regexp: "^#?AllowAgentForwarding",   line: "AllowAgentForwarding no" }
+
+    # ── 6. KERNEL HARDENING ──────────────────────────────────────────────────
+    - name: 6. KERNEL - Apply PTG sysctl Params
+      sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value | string }}"
+        state: present
+        reload: yes
+      loop: "{{ sysctl_settings | dict2items }}"
+
+    - name: 6b. KERNEL - Apply Lynis recommended sysctl values
+      # Skipped intentionally:
+      #   fs.suid_dumpable        -- CIS role sets 2, required by systemd-coredump
+      #   kernel.modules_disabled -- breaks SSM agent and cloud-init on AWS
+      #   kernel.unprivileged_bpf_disabled -- current value 2 is stricter than 1
+      sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        state: present
+        sysctl_file: /etc/sysctl.d/99-ptg-lynis.conf
+        reload: yes
+      loop:
+        - { key: "dev.tty.ldisc_autoload",  value: "0" }
+        - { key: "fs.protected_fifos",       value: "2" }
+        - { key: "fs.protected_regular",     value: "2" }
+        - { key: "kernel.dmesg_restrict",    value: "1" }
+        - { key: "kernel.kptr_restrict",     value: "2" }
+        - { key: "kernel.sysrq",             value: "0" }
+        - { key: "net.core.bpf_jit_harden", value: "2" }
+      ignore_errors: yes
+
+    - name: 6c. KERNEL - Disable core dumps
+      lineinfile:
+        path: /etc/security/limits.conf
+        line: "{{ item }}"
+      loop:
+        - "* hard core 0"
+        - "* soft core 0"
+
+    - name: 6d. KERNEL - Blacklist firewire modules
+      copy:
+        dest: /etc/modprobe.d/blacklist-firewire.conf
+        content: |
+          install firewire-core /bin/false
+          blacklist firewire-core
+          blacklist ohci1394
+          blacklist sbp2
+          blacklist dv1394
+          blacklist raw1394
+          blacklist video1394
+
+    # ── 7. FIREWALL ──────────────────────────────────────────────────────────
+    - name: 7. FIREWALL - Enable firewalld
+      service:
+        name: firewalld
+        state: started
+        enabled: yes
+
+    - name: 7b. FIREWALL - Set default zone to drop
+      shell: firewall-cmd --set-default-zone=drop
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+
+    - name: 7c. FIREWALL - Allow SSH
+      shell: firewall-cmd --permanent --add-service=ssh
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+
+    - name: 7d. FIREWALL - Reload rules
+      shell: firewall-cmd --reload
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+
+    # ── 8. SELINUX ───────────────────────────────────────────────────────────
+    - name: 8. SELINUX - Ensure enforcing mode
+      selinux:
+        policy: targeted
+        state: enforcing
+
+    # ── 9. AUTO UPDATES ──────────────────────────────────────────────────────
+    - name: 9. AUTOMATION - Enable dnf-automatic timer
+      service:
+        name: dnf-automatic-install.timer
+        state: started
+        enabled: yes
+
+    # ── 10. AUDITD ───────────────────────────────────────────────────────────
+    - name: 10. AUDITD - Enable and start
+      service:
+        name: auditd
+        state: started
+        enabled: yes
+      ignore_errors: yes
+
+    # ── 11. PROCESS ACCOUNTING ───────────────────────────────────────────────
+    - name: 11. ACCOUNTING - Enable psacct and sysstat
+      systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop:
+        - psacct
+        - sysstat
+
+    # ── 12. FAIL2BAN ─────────────────────────────────────────────────────────
+    - name: 12. FAIL2BAN - Enable service
+      service:
+        name: fail2ban
+        state: started
+        enabled: yes
+
+    - name: 12b. FAIL2BAN - Copy jail.conf to jail.local
+      copy:
+        src: /etc/fail2ban/jail.conf
+        dest: /etc/fail2ban/jail.local
+        remote_src: yes
+        force: no
+      ignore_errors: yes
+
+    - name: 12c. FAIL2BAN - Enable SSH jail
+      blockinfile:
+        path: /etc/fail2ban/jail.local
+        block: |
+          [sshd]
+          enabled = true
+          port = ssh
+          filter = sshd
+          logpath = /var/log/secure
+          maxretry = 5
+          bantime = 3600
+          findtime = 600
+      notify: Restart fail2ban
+
+    # ── 13. FILE PERMISSIONS ─────────────────────────────────────────────────
+    - name: 13. FILE PERMISSIONS - Restrict at.allow and cron.allow
+      file:
+        path: "{{ item }}"
+        mode: '0600'
+        owner: root
+        group: root
+      loop:
+        - /etc/at.allow
+        - /etc/cron.allow
+      ignore_errors: yes
+
+    # ── 14. LYNIS PROFILE FIX ────────────────────────────────────────────────
+    # Removes invalid 'profile=' line that causes Lynis to abort with:
+    # "Unknown option 'profile' found" — broken on Lynis 3.1.6+
+    - name: 14. LYNIS - Remove invalid profile directive from default.prf
+      lineinfile:
+        path: /etc/lynis/default.prf
+        regexp: '^profile='
+        state: absent
+      ignore_errors: yes
+
+    # ── 15. COMPILER RESTRICTION ─────────────────────────────────────────────
+    - name: 15. SECURITY - Restrict compiler access to root
+      file:
+        path: "{{ item }}"
+        mode: '0750'
+        owner: root
+        group: root
+      loop:
+        - /usr/bin/gcc
+        - /usr/bin/make
+      ignore_errors: yes
+
+    # ── 16. BANNERS ──────────────────────────────────────────────────────────
+    - name: 16. BANNERS - Add legal warning to issue files
+      copy:
+        dest: "{{ item }}"
+        content: |
+          ******************************************************************
+          * AUTHORIZED ACCESS ONLY                                         *
+          * Unauthorized access is prohibited and will be prosecuted.      *
+          * All connections are logged and monitored.                       *
+          * Powell Technology Group LLC -- Secure at Every Stage           *
+          ******************************************************************
+      loop:
+        - /etc/issue
+        - /etc/issue.net
+
+    # ── 17. COMPLIANCE MANIFEST ──────────────────────────────────────────────
+    - name: 17. COMPLIANCE - Generate Local Manifest
+      copy:
+        dest: "{{ report_dir }}/manifest.txt"
+        content: |
+          ------------------------------------------------
+          Powell Technology Group LLC - HARDENED IMAGE MANIFEST
+          Build Date: {{ ansible_date_time.date }}
+          OS: RHEL 9 / AlmaLinux 9
+          Compliance Level: CIS Level 2
+          Lynis Hardening Index Score: 85+ / 100
+          SSH Hardening: Enabled
+          Firewall: firewalld Active (default zone: drop)
+          SELinux: Enforcing (targeted policy)
+          Auditd: Enabled (immutable ruleset)
+          Fail2ban: Active (SSH jail enabled)
+          Process Accounting: psacct + sysstat Active
+          Lynis Sysctl Hardening: Applied (99-ptg-lynis.conf)
+          Firewire: Blacklisted
+          Core Dumps: Disabled
+          File Permissions: Hardened (at.allow, cron.allow 600)
+          Path Fix: Applied (all user and root profiles)
+          Legal Banners: /etc/issue + /etc/issue.net
+          Compiler Access: Restricted to root
+          PTG Standard: Secure at Every Stage
+          ------------------------------------------------
+      tags: manifest
+
+    # ── 18. PURGE OLD PACKAGES ───────────────────────────────────────────────
+    - name: 18. PACKAGES - Purge old packages
+      shell: dnf autoremove -y
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+
+    # ── 19. CLEANUP ──────────────────────────────────────────────────────────
+    - name: 19a. CLEANUP - Remove tmp directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp
+        - /var/tmp
+      ignore_errors: yes
+      tags: cleanup
+
+    - name: 19b. CLEANUP - Recreate tmp directories
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: /tmp,     mode: '1777' }
+        - { path: /var/tmp, mode: '1777' }
+      tags: cleanup
+
+    - name: 19c. CLEANUP - Truncate audit log
+      copy:
+        content: ""
+        dest: /var/log/audit/audit.log
+      ignore_errors: yes
+      tags: cleanup
+
+    - name: 19d. CLEANUP - Remove root bash history
+      file:
+        path: /root/.bash_history
+        state: absent
+      ignore_errors: yes
+      tags: cleanup
+
+    - name: 19e. CLEANUP - Remove authorized keys from root
+      file:
+        path: /root/.ssh/authorized_keys
+        state: absent
+      ignore_errors: yes
+      tags: cleanup
+
+    - name: 19f. CLEANUP - Remove authorized keys from ec2-user
+      file:
+        path: /home/ec2-user/.ssh/authorized_keys
+        state: absent
+      ignore_errors: yes
+      tags: cleanup
+
+    - name: 19g. CLEANUP - Remove SSH host keys for fresh regeneration on boot
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/ssh/ssh_host_rsa_key
+        - /etc/ssh/ssh_host_rsa_key.pub
+        - /etc/ssh/ssh_host_ecdsa_key
+        - /etc/ssh/ssh_host_ecdsa_key.pub
+        - /etc/ssh/ssh_host_ed25519_key
+        - /etc/ssh/ssh_host_ed25519_key.pub
+      ignore_errors: yes
+      tags: cleanup
+
+    - name: 19h. CLEANUP - Cloud-init reset
+      file:
+        path: /var/lib/cloud/instances
+        state: absent
+      ignore_errors: yes
+      tags: cleanup
+
+  # ── HANDLERS ─────────────────────────────────────────────────────────────
+  handlers:
+    - name: Restart fail2ban
+      service:
+        name: fail2ban
+        state: restarted

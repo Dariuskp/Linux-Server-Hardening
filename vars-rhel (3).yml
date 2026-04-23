@@ -1,0 +1,42 @@
+---
+brand_name: "PTG"
+report_dir: "/opt/PTG/compliance"
+
+allowed_groups: ["sudo", "wheel", "adm"]
+
+# CIS Hardening Toggles
+run_cis_level_1: true
+run_cis_level_2: true
+setup_audit: true
+
+# Set CIS Profile
+rhel9cis_authselect_custom_profile_name: "ptg_cis_profile"
+
+# Exclusiion list
+rhel9cis_sudoers_exclude_nopasswd_list:
+  - /etc/sudoers.d/90-cloud-init-users
+
+# Disable disruptive rules for build environment
+rhel9cis_rule_5_1_5: false
+rhel9cis_disruption_high: false
+
+# Network Hardening
+sysctl_settings:
+  net.ipv4.ip_forward: 0
+  net.ipv4.conf.all.send_redirects: 0
+  net.ipv4.conf.all.accept_redirects: 0
+  net.ipv4.tcp_syncookies: 1
+
+# RHEL/AlmaLinux specific packages
+base_packages:
+  - firewalld
+  - audit
+  - audispd-plugins
+  - fail2ban
+  - tar
+  - curl
+  - lynis
+  - rkhunter
+  - aide
+  - policycoreutils
+  - setools-console
